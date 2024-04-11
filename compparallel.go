@@ -3,8 +3,6 @@ package routinghelpers
 import (
 	"context"
 	"errors"
-	"fmt"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,8 +13,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/multiformats/go-multihash"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.uber.org/multierr"
 )
 
@@ -54,8 +50,6 @@ func (r *composableParallel) Routers() []routing.Routing {
 
 // Provide will call all Routers in parallel.
 func (r *composableParallel) Provide(ctx context.Context, cid cid.Cid, provide bool) (err error) {
-	ctx, end := tracer.Provide(nameParallel, ctx, cid, provide)
-	defer func() { end(err) }()
 
 	return executeParallel(ctx, r.routers,
 		func(ctx context.Context, r routing.Routing) error {
@@ -67,8 +61,6 @@ func (r *composableParallel) Provide(ctx context.Context, cid cid.Cid, provide b
 // ProvideMany will call all Routers in parallel, falling back to iterative
 // single Provide call for routers which do not support [ProvideManyRouter].
 func (r *composableParallel) ProvideMany(ctx context.Context, keys []multihash.Multihash) (err error) {
-	ctx, end := tracer.ProvideMany(nameParallel, ctx, keys)
-	defer func() { end(err) }()
 
 	return executeParallel(ctx, r.routers,
 		func(ctx context.Context, r routing.Routing) error {
@@ -107,7 +99,6 @@ func (r *composableParallel) Ready() bool {
 // If count is set, only that amount of elements will be returned without any specification about from what router is obtained.
 // To gather providers from a set of Routers first, you can use the ExecuteAfter timer to delay some Router execution.
 func (r *composableParallel) FindProvidersAsync(ctx context.Context, cid cid.Cid, count int) <-chan peer.AddrInfo {
-	ctx, chWrapper := tracer.FindProvidersAsync(nameParallel, ctx, cid, count)
 
 	var totalCount int64
 	ch, err := getChannelOrErrorParallel(
@@ -128,14 +119,11 @@ func (r *composableParallel) FindProvidersAsync(ctx context.Context, cid cid.Cid
 		ch = make(chan peer.AddrInfo)
 		close(ch)
 	}
-
-	return chWrapper(ch, err)
+	return ch
 }
 
 // FindPeer will execute all Routers in parallel, getting the first AddrInfo found and cancelling all other Router calls.
 func (r *composableParallel) FindPeer(ctx context.Context, id peer.ID) (p peer.AddrInfo, err error) {
-	ctx, end := tracer.FindPeer(nameParallel, ctx, id)
-	defer func() { end(p, err) }()
 
 	return getValueOrErrorParallel(ctx, r.routers,
 		func(ctx context.Context, r routing.Routing) (peer.AddrInfo, bool, error) {
@@ -148,9 +136,6 @@ func (r *composableParallel) FindPeer(ctx context.Context, id peer.ID) (p peer.A
 // PutValue will execute all Routers in parallel. If a Router fails and IgnoreError flag is not set, the whole execution will fail.
 // Some Puts before the failure might be successful, even if we return an error.
 func (r *composableParallel) PutValue(ctx context.Context, key string, val []byte, opts ...routing.Option) (err error) {
-	ctx, end := tracer.PutValue(nameParallel, ctx, key, val, opts...)
-	defer func() { end(err) }()
-
 	return executeParallel(ctx, r.routers,
 		func(ctx context.Context, r routing.Routing) error {
 			return r.PutValue(ctx, key, val, opts...)
@@ -160,8 +145,6 @@ func (r *composableParallel) PutValue(ctx context.Context, key string, val []byt
 
 // GetValue will execute all Routers in parallel. The first value found will be returned, cancelling all other executions.
 func (r *composableParallel) GetValue(ctx context.Context, key string, opts ...routing.Option) (val []byte, err error) {
-	ctx, end := tracer.GetValue(nameParallel, ctx, key, opts...)
-	defer func() { end(val, err) }()
 
 	return getValueOrErrorParallel(ctx, r.routers,
 		func(ctx context.Context, r routing.Routing) ([]byte, bool, error) {
@@ -171,21 +154,17 @@ func (r *composableParallel) GetValue(ctx context.Context, key string, opts ...r
 }
 
 func (r *composableParallel) SearchValue(ctx context.Context, key string, opts ...routing.Option) (<-chan []byte, error) {
-	ctx, wrapper := tracer.SearchValue(nameParallel, ctx, key, opts...)
-
-	return wrapper(getChannelOrErrorParallel(
+	return getChannelOrErrorParallel(
 		ctx,
 		r.routers,
 		func(ctx context.Context, r routing.Routing) (<-chan []byte, error) {
 			return r.SearchValue(ctx, key, opts...)
 		},
 		func() bool { return false }, true,
-	))
+	)
 }
 
 func (r *composableParallel) Bootstrap(ctx context.Context) (err error) {
-	ctx, end := tracer.Bootstrap(nameParallel, ctx)
-	defer end(err)
 
 	return executeParallel(ctx, r.routers,
 		func(ctx context.Context, r routing.Routing) error {
@@ -388,22 +367,12 @@ func getChannelOrErrorParallel[T any](
 	var sent atomic.Bool
 
 	for _, r := range routers {
-		ctx, span := tracer.StartSpan(ctx, composeName+".worker")
 		isBlocking := !isSearchValue || !r.DoNotWaitForSearchValue
 		if isBlocking {
 			blocking.Add(1)
 		}
-		isRecording := span.IsRecording()
-		if isRecording {
-			span.SetAttributes(
-				attribute.Bool("blocking", isBlocking),
-				attribute.Stringer("type", reflect.TypeOf(r.Router)),
-				attribute.String("string", fmt.Sprint(r.Router)),
-			)
-		}
 
 		go func(r *ParallelRouter) {
-			defer span.End()
 			defer fwg.Done()
 			defer func() {
 				var remainingBlockers uint64
@@ -436,9 +405,6 @@ func getChannelOrErrorParallel[T any](
 
 			valueChan, err := f(ctx, r.Router)
 			if err != nil {
-				if isRecording {
-					span.SetStatus(codes.Error, err.Error())
-				}
 
 				if r.IgnoreError {
 					return
@@ -453,9 +419,6 @@ func getChannelOrErrorParallel[T any](
 
 				return
 			}
-			if isRecording {
-				span.AddEvent("started streaming")
-			}
 
 			for first := true; true; first = false {
 				select {
@@ -464,9 +427,6 @@ func getChannelOrErrorParallel[T any](
 				case val, ok := <-valueChan:
 					if !ok {
 						return
-					}
-					if isRecording {
-						span.AddEvent("got result")
 					}
 
 					if first {

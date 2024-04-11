@@ -30,9 +30,6 @@ const composeName = "Compose"
 
 // PutValue adds value corresponding to given Key.
 func (cr *Compose) PutValue(ctx context.Context, key string, value []byte, opts ...routing.Option) (err error) {
-	ctx, end := tracer.PutValue(composeName, ctx, key, value, opts...)
-	defer func() { end(err) }()
-
 	if cr.ValueStore == nil {
 		return routing.ErrNotSupported
 	}
@@ -41,8 +38,6 @@ func (cr *Compose) PutValue(ctx context.Context, key string, value []byte, opts 
 
 // GetValue searches for the value corresponding to given Key.
 func (cr *Compose) GetValue(ctx context.Context, key string, opts ...routing.Option) (value []byte, err error) {
-	ctx, end := tracer.GetValue(composeName, ctx, key, opts...)
-	defer func() { end(value, err) }()
 
 	if cr.ValueStore == nil {
 		return nil, routing.ErrNotFound
@@ -52,8 +47,6 @@ func (cr *Compose) GetValue(ctx context.Context, key string, opts ...routing.Opt
 
 // SearchValue searches for the value corresponding to given Key.
 func (cr *Compose) SearchValue(ctx context.Context, key string, opts ...routing.Option) (ch <-chan []byte, err error) {
-	ctx, wrapper := tracer.SearchValue(composeName, ctx, key, opts...)
-	defer func() { ch, err = wrapper(ch, err) }()
 
 	if cr.ValueStore == nil {
 		out := make(chan []byte)
@@ -67,9 +60,6 @@ func (cr *Compose) SearchValue(ctx context.Context, key string, opts ...routing.
 // passed, it also announces it, otherwise it is just kept in the local
 // accounting of which objects are being provided.
 func (cr *Compose) Provide(ctx context.Context, c cid.Cid, local bool) (err error) {
-	ctx, end := tracer.Provide(composeName, ctx, c, local)
-	defer func() { end(err) }()
-
 	if cr.ContentRouting == nil {
 		return routing.ErrNotSupported
 	}
@@ -81,22 +71,17 @@ func (cr *Compose) Provide(ctx context.Context, c cid.Cid, local bool) (err erro
 // If count > 0, it returns at most count providers. If count == 0, it returns
 // an unbounded number of providers.
 func (cr *Compose) FindProvidersAsync(ctx context.Context, c cid.Cid, count int) <-chan peer.AddrInfo {
-	ctx, wrapper := tracer.FindProvidersAsync(composeName, ctx, c, count)
-
 	if cr.ContentRouting == nil {
 		ch := make(chan peer.AddrInfo)
 		close(ch)
-		return wrapper(ch, routing.ErrNotFound)
+		return ch
 	}
-	return wrapper(cr.ContentRouting.FindProvidersAsync(ctx, c, count), nil)
+	return cr.ContentRouting.FindProvidersAsync(ctx, c, count)
 }
 
 // FindPeer searches for a peer with given ID, returns a peer.AddrInfo
 // with relevant addresses.
 func (cr *Compose) FindPeer(ctx context.Context, p peer.ID) (info peer.AddrInfo, err error) {
-	ctx, end := tracer.FindPeer(composeName, ctx, p)
-	defer func() { end(info, err) }()
-
 	if cr.PeerRouting == nil {
 		return peer.AddrInfo{}, routing.ErrNotFound
 	}
@@ -113,9 +98,6 @@ func (cr *Compose) GetPublicKey(ctx context.Context, p peer.ID) (ci.PubKey, erro
 
 // Bootstrap the router.
 func (cr *Compose) Bootstrap(ctx context.Context) (err error) {
-	ctx, end := tracer.Bootstrap(composeName, ctx)
-	defer func() { end(err) }()
-
 	// Deduplicate. Technically, calling bootstrap multiple times shouldn't
 	// be an issue but using the same router for multiple fields of Compose
 	// is common.
